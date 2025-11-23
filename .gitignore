@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+
+# TensorFlow
+*.ckpt
+*.h5
+*.pb
+
+# Results (optional - comment out if you want to track results)
+results/
+plots/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
