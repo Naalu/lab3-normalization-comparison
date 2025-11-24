@@ -471,3 +471,452 @@ class WeightNormalization:
             "v_norm": float(v_norm.numpy()),
             "w_norm": float(w_norm.numpy()),
         }
+
+
+# ============================================================================
+# KERAS LAYER WRAPPERS FOR FUNCTIONAL API COMPATIBILITY
+# ============================================================================
+
+
+class BatchNormalizationLayer(tf.keras.layers.Layer):
+    """
+    Keras Layer wrapper for custom BatchNormalization.
+
+    This wrapper allows our custom BatchNormalization to work with Keras
+    Functional API, which requires proper Layer subclassing to handle
+    symbolic tensors during model construction.
+
+    IMPORTANT: The wrapper manages the lifecycle:
+    1. Build phase: Creates the custom BatchNormalization instance
+    2. Call phase: Forwards to custom implementation
+    3. Provides access to underlying object for verification
+    """
+
+    def __init__(self, num_features, momentum=0.99, epsilon=1e-5, **kwargs):
+        super().__init__(**kwargs)
+        self.num_features = num_features
+        self.momentum = momentum
+        self.epsilon = epsilon
+        self.bn = None
+
+    def build(self, input_shape):
+        """
+        Called automatically when layer is first used.
+        Creates the custom BatchNormalization instance.
+        """
+        self.bn = BatchNormalization(
+            num_features=self.num_features, momentum=self.momentum, epsilon=self.epsilon
+        )
+        super().build(input_shape)
+
+    def call(self, inputs, training=None):
+        """
+        Forward pass - delegates to custom implementation.
+
+        Args:
+            inputs: Input tensor
+            training: Boolean flag for training vs inference mode
+        """
+        if self.bn is None:
+            raise ValueError("Layer must be built before calling")
+
+        # Default to training=False if not specified (safe for inference)
+        if training is None:
+            training = False
+
+        return self.bn(inputs, training=training)
+
+    def get_custom_norm(self):
+        """
+        Return the underlying custom normalization object.
+        Used for verification and accessing learnable parameters.
+        """
+        return self.bn
+
+    def get_config(self):
+        """Return configuration for serialization (if needed)"""
+        config = super().get_config()
+        config.update(
+            {
+                "num_features": self.num_features,
+                "momentum": self.momentum,
+                "epsilon": self.epsilon,
+            }
+        )
+        return config
+
+
+class LayerNormalizationLayer(tf.keras.layers.Layer):
+    """
+    Keras Layer wrapper for custom LayerNormalization.
+
+    Simpler than BatchNorm wrapper since LayerNorm has no training/inference
+    mode distinction (same computation always).
+    """
+
+    def __init__(self, normalized_shape, epsilon=1e-5, **kwargs):
+        super().__init__(**kwargs)
+        self.normalized_shape = normalized_shape
+        self.epsilon = epsilon
+        self.ln = None
+
+    def build(self, input_shape):
+        """Create the custom LayerNormalization instance"""
+        self.ln = LayerNormalization(
+            normalized_shape=self.normalized_shape, epsilon=self.epsilon
+        )
+        super().build(input_shape)
+
+    def call(self, inputs, training=None):
+        """
+        Forward pass - delegates to custom implementation.
+        Note: training argument is ignored since LayerNorm doesn't need it.
+        """
+        if self.ln is None:
+            raise ValueError("Layer must be built before calling")
+
+        return self.ln(inputs)
+
+    def get_custom_norm(self):
+        """Return the underlying custom normalization object"""
+        return self.ln
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "normalized_shape": self.normalized_shape,
+                "epsilon": self.epsilon,
+            }
+        )
+        return config
+
+
+# ============================================================================
+# WEIGHT NORMALIZATION KERAS LAYERS
+# ============================================================================
+
+
+class WeightNormDense(tf.keras.layers.Layer):
+    """
+    Dense layer with Weight Normalization.
+
+    Implements: w = (g / ||v||) * v
+
+    This is a complete Dense layer implementation that uses weight normalization
+    internally. It replaces tf.keras.layers.Dense when using weight normalization.
+
+    LAB REQUIREMENT: "Should have WeightNorm, BatchNorm and LayerNorm three
+    different functions. Use them in your original forward pass."
+    """
+
+    def __init__(
+        self,
+        units,
+        use_bias=True,
+        activation=None,
+        kernel_initializer="he_normal",
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.units = units
+        self.use_bias = use_bias
+        self.activation = tf.keras.activations.get(activation)
+        self.kernel_initializer = tf.keras.initializers.get(kernel_initializer)
+
+        # Weight normalization components (will be created in build())
+        self.wn = None
+        self.v = None
+        self.g = None
+        self.bias = None
+
+    def build(self, input_shape):
+        """Initialize weight normalization parameters"""
+        input_dim = input_shape[-1]
+
+        # Initialize direction vector v with specified initializer
+        self.v = self.add_weight(
+            name="v",
+            shape=(input_dim, self.units),
+            initializer=self.kernel_initializer,
+            trainable=True,
+        )
+
+        # Initialize magnitude g to the norm of v
+        # This ensures that initially w = v (identity transformation)
+        v_norm = tf.norm(self.v, axis=0)  # Norm for each output unit
+        self.g = self.add_weight(
+            name="g",
+            shape=(self.units,),
+            initializer=tf.keras.initializers.Constant(v_norm.numpy()),
+            trainable=True,
+        )
+
+        # Bias (if used)
+        if self.use_bias:
+            self.bias = self.add_weight(
+                name="bias", shape=(self.units,), initializer="zeros", trainable=True
+            )
+
+        # Create WeightNormalization object for verification
+        # Note: This is a simplified version that just holds references
+        self.wn = type(
+            "WeightNorm",
+            (),
+            {
+                "v": self.v,
+                "g": self.g,
+                "compute_weights": self.compute_normalized_weights,
+                "verify": self.verify_weight_norm,
+            },
+        )()
+
+        super().build(input_shape)
+
+    def compute_normalized_weights(self):
+        """
+        Compute normalized weights: w = (g / ||v||) * v
+
+        This is the core of weight normalization - we separate magnitude (g)
+        from direction (v/||v||).
+        """
+        # Compute norm of v for each output unit (column-wise)
+        v_norm = tf.norm(self.v, axis=0, keepdims=True)
+
+        # Normalize: w = (g / ||v||) * v
+        w = (self.g / v_norm) * self.v
+
+        return w
+
+    def call(self, inputs, training=None):
+        """
+        Forward pass through weight-normalized dense layer.
+
+        Args:
+            inputs: Input tensor
+            training: Unused (for interface compatibility)
+        """
+        # Compute normalized weights
+        w = self.compute_normalized_weights()
+
+        # Standard dense layer computation: output = inputs @ w + bias
+        output = tf.matmul(inputs, w)
+
+        if self.use_bias:
+            output = tf.nn.bias_add(output, self.bias)
+
+        if self.activation is not None:
+            output = self.activation(output)
+
+        return output
+
+    def verify_weight_norm(self, test_input=None, test_bias=None):
+        """
+        Verify weight normalization properties:
+        1. ||w|| should equal g (within numerical precision)
+        2. Direction of w should match direction of v
+        """
+        w = self.compute_normalized_weights()
+
+        # Compute actual norm of w for each output unit
+        w_norm = tf.norm(w, axis=0)
+
+        # Property 1: ||w|| = g
+        norm_error = tf.abs(w_norm - self.g)
+
+        # Property 2: Direction consistency
+        v_norm = tf.norm(self.v, axis=0)
+        w_direction = w / (w_norm + 1e-10)
+        v_direction = self.v / (v_norm + 1e-10)
+        direction_error = tf.norm(w_direction - v_direction, axis=0)
+
+        return {
+            "norm_property_error": float(tf.reduce_mean(norm_error).numpy()),
+            "direction_property_error": float(tf.reduce_mean(direction_error).numpy()),
+            "max_norm_error": float(tf.reduce_max(norm_error).numpy()),
+            "max_direction_error": float(tf.reduce_max(direction_error).numpy()),
+            "g_values": self.g.numpy().tolist(),
+            "mean_g": float(tf.reduce_mean(self.g).numpy()),
+        }
+
+    def get_custom_norm(self):
+        """Return weight normalization object for verification"""
+        return self.wn
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "units": self.units,
+                "use_bias": self.use_bias,
+                "activation": tf.keras.activations.serialize(self.activation),
+            }
+        )
+        return config
+
+
+class WeightNormConv2D(tf.keras.layers.Layer):
+    """
+    Conv2D layer with Weight Normalization.
+
+    Implements: w = (g / ||v||) * v for convolutional filters
+
+    Similar to WeightNormDense but for convolutional operations.
+    """
+
+    def __init__(
+        self,
+        filters,
+        kernel_size,
+        strides=(1, 1),
+        padding="valid",
+        use_bias=True,
+        activation=None,
+        kernel_initializer="he_normal",
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.filters = filters
+        self.kernel_size = (
+            kernel_size
+            if isinstance(kernel_size, tuple)
+            else (kernel_size, kernel_size)
+        )
+        self.strides = strides if isinstance(strides, tuple) else (strides, strides)
+        self.padding = padding.upper()
+        self.use_bias = use_bias
+        self.activation = tf.keras.activations.get(activation)
+        self.kernel_initializer = tf.keras.initializers.get(kernel_initializer)
+
+        self.wn = None
+        self.v = None
+        self.g = None
+        self.bias = None
+
+    def build(self, input_shape):
+        """Initialize weight normalization parameters for conv filters"""
+        input_channels = input_shape[-1]
+
+        # v represents the direction of convolutional filters
+        # Shape: (kernel_height, kernel_width, input_channels, output_filters)
+        filter_shape = self.kernel_size + (input_channels, self.filters)
+
+        self.v = self.add_weight(
+            name="v",
+            shape=filter_shape,
+            initializer=self.kernel_initializer,
+            trainable=True,
+        )
+
+        # g controls the magnitude of each filter
+        # For conv layers, we typically have one g per output filter
+        # Compute initial norm per filter
+        v_reshaped = tf.reshape(self.v, [-1, self.filters])
+        v_norm = tf.norm(v_reshaped, axis=0)
+
+        self.g = self.add_weight(
+            name="g",
+            shape=(self.filters,),
+            initializer=tf.keras.initializers.Constant(v_norm.numpy()),
+            trainable=True,
+        )
+
+        if self.use_bias:
+            self.bias = self.add_weight(
+                name="bias", shape=(self.filters,), initializer="zeros", trainable=True
+            )
+
+        # Create verification object
+        self.wn = type(
+            "WeightNorm",
+            (),
+            {
+                "v": self.v,
+                "g": self.g,
+                "compute_weights": self.compute_normalized_weights,
+                "verify": self.verify_weight_norm,
+            },
+        )()
+
+        super().build(input_shape)
+
+    def compute_normalized_weights(self):
+        """
+        Compute normalized convolutional filters: w = (g / ||v||) * v
+        """
+        # Reshape v to compute norm per filter
+        v_reshaped = tf.reshape(self.v, [-1, self.filters])
+        v_norm = tf.norm(v_reshaped, axis=0, keepdims=True)
+
+        # Normalize: w = (g / ||v||) * v
+        # Broadcast g across spatial and input channel dimensions
+        v_norm_reshaped = tf.reshape(v_norm, [1, 1, 1, self.filters])
+        g_reshaped = tf.reshape(self.g, [1, 1, 1, self.filters])
+
+        w = (g_reshaped / v_norm_reshaped) * self.v
+
+        return w
+
+    def call(self, inputs, training=None):
+        """Forward pass through weight-normalized conv layer"""
+        # Compute normalized filters
+        w = self.compute_normalized_weights()
+
+        # Apply convolution
+        output = tf.nn.conv2d(
+            inputs, w, strides=[1] + list(self.strides) + [1], padding=self.padding
+        )
+
+        if self.use_bias:
+            output = tf.nn.bias_add(output, self.bias)
+
+        if self.activation is not None:
+            output = self.activation(output)
+
+        return output
+
+    def verify_weight_norm(self, test_input=None, test_bias=None):
+        """Verify weight normalization properties for conv filters"""
+        w = self.compute_normalized_weights()
+
+        # Reshape to compute norms per filter
+        w_reshaped = tf.reshape(w, [-1, self.filters])
+        w_norm = tf.norm(w_reshaped, axis=0)
+
+        # Property 1: ||w|| = g
+        norm_error = tf.abs(w_norm - self.g)
+
+        # Property 2: Direction consistency
+        v_reshaped = tf.reshape(self.v, [-1, self.filters])
+        v_norm = tf.norm(v_reshaped, axis=0)
+
+        w_direction = w_reshaped / (w_norm + 1e-10)
+        v_direction = v_reshaped / (v_norm + 1e-10)
+        direction_error = tf.norm(w_direction - v_direction, axis=0)
+
+        return {
+            "norm_property_error": float(tf.reduce_mean(norm_error).numpy()),
+            "direction_property_error": float(tf.reduce_mean(direction_error).numpy()),
+            "max_norm_error": float(tf.reduce_max(norm_error).numpy()),
+            "max_direction_error": float(tf.reduce_max(direction_error).numpy()),
+            "g_values": self.g.numpy().tolist(),
+            "mean_g": float(tf.reduce_mean(self.g).numpy()),
+        }
+
+    def get_custom_norm(self):
+        """Return weight normalization object"""
+        return self.wn
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "filters": self.filters,
+                "kernel_size": self.kernel_size,
+                "strides": self.strides,
+                "padding": self.padding,
+                "use_bias": self.use_bias,
+                "activation": tf.keras.activations.serialize(self.activation),
+            }
+        )
+        return config

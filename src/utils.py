@@ -369,3 +369,62 @@ def plot_small_batch_comparison(bn_results, ln_results, save_path):
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     print(f"✓ Small batch comparison saved to {save_path}")
     plt.close()
+
+
+def plot_weightnorm_verification(verification_results, save_path):
+    """
+    Plot weight normalization verification results.
+
+    Unlike BatchNorm/LayerNorm which compare against TF implementations,
+    WeightNorm verification checks mathematical properties:
+    1. ||w|| = g (magnitude property)
+    2. Direction of w matches direction of v
+
+    Args:
+        verification_results: Dict with verification metrics
+        save_path: Where to save plot
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Collect errors across all layers
+    norm_errors = []
+    direction_errors = []
+
+    for layer_name, layer_verification in verification_results.items():
+        if "norm_property_error" in layer_verification:
+            norm_errors.append(layer_verification["norm_property_error"])
+            direction_errors.append(layer_verification["direction_property_error"])
+
+    if not norm_errors:
+        print("No verification data available for WeightNorm")
+        return
+
+    # Plot 1: Norm property error (||w|| = g)
+    layers = [f"Layer {i + 1}" for i in range(len(norm_errors))]
+    axes[0].bar(layers, norm_errors, color="#06A77D", alpha=0.7, edgecolor="black")
+    axes[0].axhline(
+        y=1e-6, color="red", linestyle="--", linewidth=2, label="Target: < 1e-6"
+    )
+    axes[0].set_ylabel("Error", fontsize=12)
+    axes[0].set_title("Weight Norm Property: ||w|| = g", fontsize=14, fontweight="bold")
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3, axis="y")
+    axes[0].set_yscale("log")
+
+    # Plot 2: Direction property error
+    axes[1].bar(layers, direction_errors, color="#06A77D", alpha=0.7, edgecolor="black")
+    axes[1].axhline(
+        y=1e-6, color="red", linestyle="--", linewidth=2, label="Target: < 1e-6"
+    )
+    axes[1].set_ylabel("Error", fontsize=12)
+    axes[1].set_title(
+        "Direction Consistency: w/||w|| = v/||v||", fontsize=14, fontweight="bold"
+    )
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3, axis="y")
+    axes[1].set_yscale("log")
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    print(f"✓ WeightNorm verification plot saved to {save_path}")
+    plt.close()

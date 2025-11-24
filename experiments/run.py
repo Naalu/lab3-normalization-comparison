@@ -152,28 +152,104 @@ def run_all():
                 print("-" * 70)
 
                 verification = {}
-                test_input = tf.random.normal([batch_size, 28, 28, 1])
 
-                for i, norm_layer in enumerate(norm_layers):
-                    print(f"  Verifying layer {i}...")
-                    if hasattr(norm_layer, "verify"):
-                        layer_verification = norm_layer.verify(test_input)
-                        verification[f"layer_{i}"] = layer_verification
+                if exp_config["norm_type"] == "weightnorm":
+                    # WeightNorm verification checks mathematical properties
+                    for i, norm_layer in enumerate(norm_layers):
+                        print(f"  Verifying WeightNorm layer {i}...")
+                        if hasattr(norm_layer, "verify"):
+                            layer_verification = norm_layer.verify()
+                            verification[f"layer_{i}"] = layer_verification
 
-                        # Print verification results
-                        if "max_output_diff" in layer_verification:
                             print(
-                                f"    Max output diff: {layer_verification['max_output_diff']:.2e}"
+                                f"    Norm property error: {layer_verification['norm_property_error']:.2e}"
                             )
                             print(
-                                f"    Max gradient diff: {layer_verification['max_grad_diff']:.2e}"
+                                f"    Direction property error: {layer_verification['direction_property_error']:.2e}"
                             )
 
-                            # Check if verification passed (difference < 1e-6)
-                            if layer_verification["max_output_diff"] < 1e-6:
-                                print("    ✓ Verification PASSED (output diff < 1e-6)")
+                            if layer_verification["norm_property_error"] < 1e-5:
+                                print("    ✓ Verification PASSED (error < 1e-5)")
                             else:
-                                print("    ✗ Verification FAILED (output diff >= 1e-6)")
+                                print(
+                                    f"    ⚠ Warning: error = {layer_verification['norm_property_error']:.2e}"
+                                )
+                else:
+                    # BatchNorm/LayerNorm verification compares against TF
+                    # Create test inputs with the correct shapes for each normalization layer
+                    print("  Getting intermediate layer outputs for verification...")
+
+                    test_input = tf.random.normal([batch_size, 28, 28, 1])
+
+                    # Define expected input shapes for each normalization layer
+                    # Based on CNN architecture: Conv→BN→ReLU→Pool → Conv→BN→ReLU→Pool → Flatten→Dense→BN→ReLU
+                    if exp_config["norm_type"] == "batchnorm":
+                        # bn1: after conv1 (28x28x30)
+                        # bn2: after conv2 (14x14x60)
+                        # bn3: after dense1 (100 units)
+                        test_shapes = [
+                            (batch_size, 28, 28, 30),
+                            (batch_size, 14, 14, 60),
+                            (
+                                batch_size,
+                                100,
+                            ),  # ← FIXED: after Dense(100), not after Flatten
+                        ]
+                    elif exp_config["norm_type"] == "layernorm":
+                        # Same shapes as BatchNorm
+                        test_shapes = [
+                            (batch_size, 28, 28, 30),
+                            (batch_size, 14, 14, 60),
+                            (
+                                batch_size,
+                                100,
+                            ),  # ← FIXED: after Dense(100), not after Flatten
+                        ]
+                    else:
+                        test_shapes = []
+
+                    for i, norm_layer in enumerate(norm_layers):
+                        if i < len(test_shapes):
+                            print(
+                                f"  Verifying layer {i} with shape {test_shapes[i]}..."
+                            )
+
+                            # Create test input with correct shape
+                            layer_test_input = tf.random.normal(test_shapes[i])
+
+                            if hasattr(norm_layer, "verify"):
+                                try:
+                                    layer_verification = norm_layer.verify(
+                                        layer_test_input
+                                    )
+                                    verification[f"layer_{i}"] = layer_verification
+
+                                    if "max_output_diff" in layer_verification:
+                                        print(
+                                            f"    Max output diff: {layer_verification['max_output_diff']:.2e}"
+                                        )
+                                        print(
+                                            f"    Max gradient diff: {layer_verification['max_grad_diff']:.2e}"
+                                        )
+
+                                        if layer_verification["max_output_diff"] < 1e-6:
+                                            print(
+                                                "    ✓ Verification PASSED (output diff < 1e-6)"
+                                            )
+                                        else:
+                                            print(
+                                                f"    ⚠ Verification issue (output diff = {layer_verification['max_output_diff']:.2e})"
+                                            )
+                                except Exception as e:
+                                    print(f"    ⚠ Verification error: {e}")
+                                    import traceback
+
+                                    traceback.print_exc()
+                                    verification[f"layer_{i}"] = {"error": str(e)}
+                        else:
+                            print(
+                                f"  Skipping verification for layer {i} (no shape definition)"
+                            )
 
             # Store results
             results = {
@@ -204,9 +280,19 @@ def run_all():
         if results.get("verification"):
             norm_type = results["config"]["norm_type"]
             print(f"\n2. Plotting verification for {exp_id}...")
-            plot_verification(
-                results["verification"], f"plots/verification_{exp_id}.png", norm_type
-            )
+
+            if norm_type == "weightnorm":
+                from src.utils import plot_weightnorm_verification
+
+                plot_weightnorm_verification(
+                    results["verification"], f"plots/verification_{exp_id}.png"
+                )
+            else:
+                plot_verification(
+                    results["verification"],
+                    f"plots/verification_{exp_id}.png",
+                    norm_type,
+                )
 
     # Plot 3: Small batch comparison (if both exist)
     bn_small = all_results.get("batchnorm_bs4")

@@ -49,8 +49,8 @@ EXPERIMENTS = [
     {
         "name": "weightnorm",
         "norm_type": "weightnorm",
-        "batch_sizes": [128, 4],  # Test normal and small batch
-        "verify": False,  # No direct TF equivalent
+        "batch_sizes": [128, 4],
+        "verify": True,  # Will verify mathematical properties
         "description": "Weight Normalization - reparameterizes weight vectors",
     },
 ]

@@ -47,8 +47,8 @@ def train_model(model, norm_layers, train_ds, val_ds, epochs, learning_rate):
         history: Dict with keys 'train_loss', 'train_accuracy', 'val_loss', 'val_accuracy'
     """
 
-    # Initialize optimizer (Adam is default for this lab)
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    # Initialize optimizer (Adam is default for this lab - using legacy Adam for M2 Macs)
+    optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=learning_rate)
 
     # Loss function: categorical crossentropy (for one-hot encoded labels)
     loss_fn = tf.keras.losses.CategoricalCrossentropy(from_logits=True)
@@ -100,16 +100,8 @@ def train_model(model, norm_layers, train_ds, val_ds, epochs, learning_rate):
             # Use GradientTape to record operations for automatic differentiation
             with tf.GradientTape() as tape:
                 # Forward pass through model
-                # For custom normalization, we need to manually call them with training=True
-                if norm_layers and any(
-                    hasattr(nl, "running_mean") for nl in norm_layers
-                ):
-                    # This is batch norm - need to set training mode
-                    # Note: This is a simplified approach; in production, you'd use
-                    # Keras's training argument propagation
-                    logits = model(x_batch, training=True)
-                else:
-                    logits = model(x_batch, training=True)
+                # Training flag is now properly handled by Keras
+                logits = model(x_batch, training=True)
 
                 # Compute loss
                 loss = loss_fn(y_batch, logits)
