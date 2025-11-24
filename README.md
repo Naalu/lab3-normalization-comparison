@@ -176,7 +176,7 @@ output = tf.matmul(x, w) + b
 
 ## Author
 
-**Your Name**
+**Karl Reger**
 - Course: CS 599 - Foundations of Deep Learning
 - Institution: Northern Arizona University
 - Semester: Fall 2025
@@ -186,3 +186,4 @@ output = tf.matmul(x, w) + b
 - Course instructor for the assignment design
 - TensorFlow team for the deep learning framework
 - Fashion-MNIST creators for the dataset
+
